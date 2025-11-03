@@ -109,6 +109,38 @@ export class FatSecret {
     return await this.request("food.get", { food_id: foodId });
   }
 
+  // ========== RECIPE METHODS ==========
+
+  // recipes.search → search_expression, max_results, page_number, recipe_types
+  async searchRecipes({ query, maxResults = 10, page = 0, recipeTypes = "" }) {
+    const params = {
+      search_expression: query,
+      max_results: maxResults,
+      page_number: page
+    };
+    if (recipeTypes) {
+      params.recipe_types = recipeTypes;
+    }
+    return await this.request("recipes.search", params);
+  }
+
+  // recipe.get → recipe_id
+  async getRecipeById(recipeId) {
+    return await this.request("recipe.get", { recipe_id: recipeId });
+  }
+
+  // Get popular recipes by searching with common/popular search terms
+  // Note: FatSecret API doesn't have a dedicated "trending" endpoint
+  // This uses recipes.search with popular terms as a workaround
+  async getTrendingRecipes({ maxResults = 20, page = 0, category = "" } = {}) {
+    const params = {
+      search_expression: category || "popular",
+      max_results: maxResults,
+      page_number: page
+    };
+    return await this.request("recipes.search", params);
+  }
+
   normalizeAxiosError(err, message) {
     const status = err?.response?.status;
     const statusText = err?.response?.statusText;

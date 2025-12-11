@@ -78,6 +78,211 @@ app.get("/food/:id", async (req, res, next) => {
   }
 });
 
+// GET /foods/indian-serving?food=chole rice → Get servings according to Indian standards
+app.get("/foods/indian-serving", async (req, res, next) => {
+  try {
+    const foodName = (req.query.food || "").toString().trim();
+    if (!foodName) {
+      return res.status(400).json({ error: "Missing required query parameter: food" });
+    }
+
+    // Search for the food
+    const searchResults = await fatsecret.searchFoods({ query: foodName, maxResults: 5, page: 0 });
+    
+    if (!searchResults?.foods?.food || searchResults.foods.food.length === 0) {
+      return res.status(404).json({ 
+        success: false, 
+        error: `No food found matching "${foodName}"` 
+      });
+    }
+
+    // Get the first result (most relevant)
+    const firstFood = Array.isArray(searchResults.foods.food) 
+      ? searchResults.foods.food[0] 
+      : searchResults.foods.food;
+    
+    const foodId = firstFood.food_id;
+    const foodDetails = await fatsecret.getFoodById(foodId);
+
+    // Extract serving information and convert to Indian standards
+    const indianServings = convertToIndianStandards(foodDetails, firstFood);
+    
+    res.json({
+      success: true,
+      food: {
+        id: foodId,
+        name: firstFood.food_name || foodName,
+        description: firstFood.food_description || ""
+      },
+      indian_servings: indianServings,
+      original_data: foodDetails
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Helper function to convert servings to Indian standards
+function convertToIndianStandards(foodDetails, foodInfo) {
+  const servings = [];
+  
+  // Indian standard measurements
+  const INDIAN_STANDARDS = {
+    // Rice dishes (chole rice, rajma rice, biryani, etc.)
+    rice_dish: {
+      katori: { grams: 180, description: "1 Katori (medium bowl)" },
+      half_katori: { grams: 90, description: "1/2 Katori" },
+      full_plate: { grams: 250, description: "1 Full Plate" }
+    },
+    // Dal/Curry dishes
+    dal_curry: {
+      katori: { grams: 150, description: "1 Katori (medium bowl)" },
+      half_katori: { grams: 75, description: "1/2 Katori" }
+    },
+    // Roti/Chapati
+    roti: {
+      piece: { grams: 30, description: "1 Roti/Chapati" },
+      two_pieces: { grams: 60, description: "2 Rotis/Chapatis" }
+    },
+    // Standard Indian cup (200ml)
+    cup: {
+      one_cup: { grams: 200, description: "1 Cup (Indian standard)" },
+      half_cup: { grams: 100, description: "1/2 Cup" }
+    }
+  };
+
+  // Extract serving information from foodDetails
+  const food = foodDetails?.food;
+  if (!food) {
+    return servings;
+  }
+
+  // Get servings from the food details
+  const foodServings = food.servings?.serving || [];
+  const servingsArray = Array.isArray(foodServings) ? foodServings : [foodServings];
+
+  // Determine food type based on name
+  const foodName = (food.food_name || foodInfo?.food_name || "").toLowerCase();
+  const isRiceDish = foodName.includes("rice") || foodName.includes("biryani") || 
+                     foodName.includes("pulao") || foodName.includes("khichdi");
+  const isDalCurry = foodName.includes("dal") || foodName.includes("curry") || 
+                     foodName.includes("sabzi") || foodName.includes("rajma") || 
+                     foodName.includes("chole");
+  const isRoti = foodName.includes("roti") || foodName.includes("chapati") || 
+                 foodName.includes("naan") || foodName.includes("paratha");
+
+  // Process each serving and convert to Indian standards
+  servingsArray.forEach(serving => {
+    if (!serving) return;
+    
+    const servingGrams = parseFloat(serving.metric_serving_amount || serving.number || 0);
+    const servingUnit = serving.metric_serving_unit || serving.measurement_description || "g";
+    
+    // Convert to grams if needed
+    let grams = servingGrams;
+    if (servingUnit.toLowerCase() === "ml" || servingUnit.toLowerCase() === "cup") {
+      // Approximate: 1ml ≈ 1g for most foods, 1 cup ≈ 200g
+      grams = servingUnit.toLowerCase() === "cup" ? servingGrams * 200 : servingGrams;
+    }
+
+    // Skip if grams is 0 or invalid
+    if (!grams || grams <= 0) return;
+
+    // Add original serving
+    servings.push({
+      original: {
+        amount: servingGrams,
+        unit: servingUnit,
+        description: serving.measurement_description || servingUnit,
+        calories: parseFloat(serving.calories || 0),
+        protein: parseFloat(serving.protein || 0),
+        carbs: parseFloat(serving.carbohydrate || 0),
+        fat: parseFloat(serving.fat || 0),
+        fiber: parseFloat(serving.fiber || 0)
+      },
+      indian_equivalents: []
+    });
+
+    const lastServing = servings[servings.length - 1];
+    let hasSpecificMeasurements = false;
+
+    // Add Indian standard equivalents based on food type
+    if (isRiceDish) {
+      Object.entries(INDIAN_STANDARDS.rice_dish).forEach(([key, value]) => {
+        const multiplier = value.grams / grams;
+        lastServing.indian_equivalents.push({
+          measurement: key,
+          description: value.description,
+          equivalent_to: `${(multiplier * servingGrams).toFixed(1)} ${servingUnit}`,
+          nutrition: {
+            calories: (parseFloat(serving.calories || 0) * multiplier).toFixed(1),
+            protein: (parseFloat(serving.protein || 0) * multiplier).toFixed(1),
+            carbs: (parseFloat(serving.carbohydrate || 0) * multiplier).toFixed(1),
+            fat: (parseFloat(serving.fat || 0) * multiplier).toFixed(1),
+            fiber: (parseFloat(serving.fiber || 0) * multiplier).toFixed(1)
+          }
+        });
+      });
+      hasSpecificMeasurements = true;
+    } else if (isDalCurry) {
+      Object.entries(INDIAN_STANDARDS.dal_curry).forEach(([key, value]) => {
+        const multiplier = value.grams / grams;
+        lastServing.indian_equivalents.push({
+          measurement: key,
+          description: value.description,
+          equivalent_to: `${(multiplier * servingGrams).toFixed(1)} ${servingUnit}`,
+          nutrition: {
+            calories: (parseFloat(serving.calories || 0) * multiplier).toFixed(1),
+            protein: (parseFloat(serving.protein || 0) * multiplier).toFixed(1),
+            carbs: (parseFloat(serving.carbohydrate || 0) * multiplier).toFixed(1),
+            fat: (parseFloat(serving.fat || 0) * multiplier).toFixed(1),
+            fiber: (parseFloat(serving.fiber || 0) * multiplier).toFixed(1)
+          }
+        });
+      });
+      hasSpecificMeasurements = true;
+    } else if (isRoti) {
+      Object.entries(INDIAN_STANDARDS.roti).forEach(([key, value]) => {
+        const multiplier = value.grams / grams;
+        lastServing.indian_equivalents.push({
+          measurement: key,
+          description: value.description,
+          equivalent_to: `${(multiplier * servingGrams).toFixed(1)} ${servingUnit}`,
+          nutrition: {
+            calories: (parseFloat(serving.calories || 0) * multiplier).toFixed(1),
+            protein: (parseFloat(serving.protein || 0) * multiplier).toFixed(1),
+            carbs: (parseFloat(serving.carbohydrate || 0) * multiplier).toFixed(1),
+            fat: (parseFloat(serving.fat || 0) * multiplier).toFixed(1),
+            fiber: (parseFloat(serving.fiber || 0) * multiplier).toFixed(1)
+          }
+        });
+      });
+      hasSpecificMeasurements = true;
+    }
+
+    // Add cup measurements as a general option (only if no specific measurements were added)
+    if (!hasSpecificMeasurements) {
+      Object.entries(INDIAN_STANDARDS.cup).forEach(([key, value]) => {
+        const multiplier = value.grams / grams;
+        lastServing.indian_equivalents.push({
+          measurement: key,
+          description: value.description,
+          equivalent_to: `${(multiplier * servingGrams).toFixed(1)} ${servingUnit}`,
+          nutrition: {
+            calories: (parseFloat(serving.calories || 0) * multiplier).toFixed(1),
+            protein: (parseFloat(serving.protein || 0) * multiplier).toFixed(1),
+            carbs: (parseFloat(serving.carbohydrate || 0) * multiplier).toFixed(1),
+            fat: (parseFloat(serving.fat || 0) * multiplier).toFixed(1),
+            fiber: (parseFloat(serving.fiber || 0) * multiplier).toFixed(1)
+          }
+        });
+      });
+    }
+  });
+
+  return servings;
+}
+
 // ========== RECIPE ENDPOINTS ==========
 
 // GET /recipes/search?search=pasta&limit=10&page=0&recipe_types=breakfast → FatSecret recipes.search

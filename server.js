@@ -78,44 +78,67 @@ app.get("/food/:id", async (req, res, next) => {
   }
 });
 
-// GET /foods/indian-serving?food=chole rice → Get servings according to Indian standards
+// GET /foods/indian-serving?food=chole rice OR ?food_id=5564194 → Get servings according to Indian standards
 app.get("/foods/indian-serving", async (req, res, next) => {
   try {
     const foodName = (req.query.food || "").toString().trim();
-    if (!foodName) {
-      return res.status(400).json({ error: "Missing required query parameter: food" });
+    const foodId = (req.query.food_id || "").toString().trim();
+    
+    if (!foodName && !foodId) {
+      return res.status(400).json({ error: "Missing required query parameter: food or food_id" });
     }
 
-    // Search for the food
-    const searchResults = await fatsecret.searchFoods({ query: foodName, maxResults: 5, page: 0 });
-    
-    if (!searchResults?.foods?.food || searchResults.foods.food.length === 0) {
-      return res.status(404).json({ 
-        success: false, 
-        error: `No food found matching "${foodName}"` 
-      });
-    }
+    let foodDetails;
+    let foodInfo;
+    let finalFoodId;
+    let finalFoodName;
 
-    // Get the first result (most relevant)
-    const firstFood = Array.isArray(searchResults.foods.food) 
-      ? searchResults.foods.food[0] 
-      : searchResults.foods.food;
-    
-    const foodId = firstFood.food_id;
-    const foodDetails = await fatsecret.getFoodById(foodId);
+    if (foodId) {
+      // Direct lookup by food ID
+      finalFoodId = foodId;
+      foodDetails = await fatsecret.getFoodById(foodId);
+      
+      if (!foodDetails?.food) {
+        return res.status(404).json({ 
+          success: false, 
+          error: `No food found with ID "${foodId}"` 
+        });
+      }
+      
+      foodInfo = foodDetails.food;
+      finalFoodName = foodInfo.food_name || "";
+    } else {
+      // Search for the food by name
+      const searchResults = await fatsecret.searchFoods({ query: foodName, maxResults: 5, page: 0 });
+      
+      if (!searchResults?.foods?.food || searchResults.foods.food.length === 0) {
+        return res.status(404).json({ 
+          success: false, 
+          error: `No food found matching "${foodName}"` 
+        });
+      }
+
+      // Get the first result (most relevant)
+      foodInfo = Array.isArray(searchResults.foods.food) 
+        ? searchResults.foods.food[0] 
+        : searchResults.foods.food;
+      
+      finalFoodId = foodInfo.food_id;
+      foodDetails = await fatsecret.getFoodById(finalFoodId);
+      finalFoodName = foodInfo.food_name || foodName;
+    }
 
     // Extract serving information and convert to Indian standards
-    const indianServings = convertToIndianStandards(foodDetails, firstFood);
+    const { indianServings, indianEquivalents, transformedOriginalData } = convertToIndianStandards(foodDetails, foodInfo);
     
     res.json({
       success: true,
       food: {
-        id: foodId,
-        name: firstFood.food_name || foodName,
-        description: firstFood.food_description || ""
+        id: finalFoodId,
+        name: finalFoodName,
+        description: foodInfo.food_description || ""
       },
-      indian_servings: indianServings,
-      original_data: foodDetails
+      original_data: transformedOriginalData
     });
   } catch (err) {
     next(err);
@@ -125,6 +148,7 @@ app.get("/foods/indian-serving", async (req, res, next) => {
 // Helper function to convert servings to Indian standards
 function convertToIndianStandards(foodDetails, foodInfo) {
   const servings = [];
+  const seenServings = new Set(); // Track seen servings to avoid duplicates
   
   // Indian standard measurements
   const INDIAN_STANDARDS = {
@@ -154,7 +178,7 @@ function convertToIndianStandards(foodDetails, foodInfo) {
   // Extract serving information from foodDetails
   const food = foodDetails?.food;
   if (!food) {
-    return servings;
+    return { indianServings: servings, indianEquivalents: [], transformedOriginalData: foodDetails };
   }
 
   // Get servings from the food details
@@ -164,14 +188,27 @@ function convertToIndianStandards(foodDetails, foodInfo) {
   // Determine food type based on name
   const foodName = (food.food_name || foodInfo?.food_name || "").toLowerCase();
   const isRiceDish = foodName.includes("rice") || foodName.includes("biryani") || 
-                     foodName.includes("pulao") || foodName.includes("khichdi");
+                     foodName.includes("pulao") || foodName.includes("khichdi") ||
+                     foodName.includes("poha");
   const isDalCurry = foodName.includes("dal") || foodName.includes("curry") || 
                      foodName.includes("sabzi") || foodName.includes("rajma") || 
                      foodName.includes("chole");
   const isRoti = foodName.includes("roti") || foodName.includes("chapati") || 
                  foodName.includes("naan") || foodName.includes("paratha");
 
-  // Process each serving and convert to Indian standards
+  // Determine which Indian standards to use
+  let selectedStandards = INDIAN_STANDARDS.cup;
+  if (isRiceDish) {
+    selectedStandards = INDIAN_STANDARDS.rice_dish;
+  } else if (isDalCurry) {
+    selectedStandards = INDIAN_STANDARDS.dal_curry;
+  } else if (isRoti) {
+    selectedStandards = INDIAN_STANDARDS.roti;
+  }
+
+  // First, collect all original servings
+  let baseServingForEquivalents = null;
+  
   servingsArray.forEach(serving => {
     if (!serving) return;
     
@@ -188,7 +225,19 @@ function convertToIndianStandards(foodDetails, foodInfo) {
     // Skip if grams is 0 or invalid
     if (!grams || grams <= 0) return;
 
-    // Add original serving
+    // Create a unique key to identify duplicate servings
+    const servingKey = `${servingGrams}_${servingUnit}`;
+    if (seenServings.has(servingKey)) {
+      return; // Skip duplicate
+    }
+    seenServings.add(servingKey);
+
+    // Store the first valid serving as base for Indian equivalents calculation
+    if (!baseServingForEquivalents) {
+      baseServingForEquivalents = { serving, grams, servingGrams, servingUnit };
+    }
+
+    // Add original serving (without indian_equivalents for now)
     servings.push({
       original: {
         amount: servingGrams,
@@ -199,88 +248,98 @@ function convertToIndianStandards(foodDetails, foodInfo) {
         carbs: parseFloat(serving.carbohydrate || 0),
         fat: parseFloat(serving.fat || 0),
         fiber: parseFloat(serving.fiber || 0)
-      },
-      indian_equivalents: []
+      }
     });
-
-    const lastServing = servings[servings.length - 1];
-    let hasSpecificMeasurements = false;
-
-    // Add Indian standard equivalents based on food type
-    if (isRiceDish) {
-      Object.entries(INDIAN_STANDARDS.rice_dish).forEach(([key, value]) => {
-        const multiplier = value.grams / grams;
-        lastServing.indian_equivalents.push({
-          measurement: key,
-          description: value.description,
-          equivalent_to: `${(multiplier * servingGrams).toFixed(1)} ${servingUnit}`,
-          nutrition: {
-            calories: (parseFloat(serving.calories || 0) * multiplier).toFixed(1),
-            protein: (parseFloat(serving.protein || 0) * multiplier).toFixed(1),
-            carbs: (parseFloat(serving.carbohydrate || 0) * multiplier).toFixed(1),
-            fat: (parseFloat(serving.fat || 0) * multiplier).toFixed(1),
-            fiber: (parseFloat(serving.fiber || 0) * multiplier).toFixed(1)
-          }
-        });
-      });
-      hasSpecificMeasurements = true;
-    } else if (isDalCurry) {
-      Object.entries(INDIAN_STANDARDS.dal_curry).forEach(([key, value]) => {
-        const multiplier = value.grams / grams;
-        lastServing.indian_equivalents.push({
-          measurement: key,
-          description: value.description,
-          equivalent_to: `${(multiplier * servingGrams).toFixed(1)} ${servingUnit}`,
-          nutrition: {
-            calories: (parseFloat(serving.calories || 0) * multiplier).toFixed(1),
-            protein: (parseFloat(serving.protein || 0) * multiplier).toFixed(1),
-            carbs: (parseFloat(serving.carbohydrate || 0) * multiplier).toFixed(1),
-            fat: (parseFloat(serving.fat || 0) * multiplier).toFixed(1),
-            fiber: (parseFloat(serving.fiber || 0) * multiplier).toFixed(1)
-          }
-        });
-      });
-      hasSpecificMeasurements = true;
-    } else if (isRoti) {
-      Object.entries(INDIAN_STANDARDS.roti).forEach(([key, value]) => {
-        const multiplier = value.grams / grams;
-        lastServing.indian_equivalents.push({
-          measurement: key,
-          description: value.description,
-          equivalent_to: `${(multiplier * servingGrams).toFixed(1)} ${servingUnit}`,
-          nutrition: {
-            calories: (parseFloat(serving.calories || 0) * multiplier).toFixed(1),
-            protein: (parseFloat(serving.protein || 0) * multiplier).toFixed(1),
-            carbs: (parseFloat(serving.carbohydrate || 0) * multiplier).toFixed(1),
-            fat: (parseFloat(serving.fat || 0) * multiplier).toFixed(1),
-            fiber: (parseFloat(serving.fiber || 0) * multiplier).toFixed(1)
-          }
-        });
-      });
-      hasSpecificMeasurements = true;
-    }
-
-    // Add cup measurements as a general option (only if no specific measurements were added)
-    if (!hasSpecificMeasurements) {
-      Object.entries(INDIAN_STANDARDS.cup).forEach(([key, value]) => {
-        const multiplier = value.grams / grams;
-        lastServing.indian_equivalents.push({
-          measurement: key,
-          description: value.description,
-          equivalent_to: `${(multiplier * servingGrams).toFixed(1)} ${servingUnit}`,
-          nutrition: {
-            calories: (parseFloat(serving.calories || 0) * multiplier).toFixed(1),
-            protein: (parseFloat(serving.protein || 0) * multiplier).toFixed(1),
-            carbs: (parseFloat(serving.carbohydrate || 0) * multiplier).toFixed(1),
-            fat: (parseFloat(serving.fat || 0) * multiplier).toFixed(1),
-            fiber: (parseFloat(serving.fiber || 0) * multiplier).toFixed(1)
-          }
-        });
-      });
-    }
   });
 
-  return servings;
+  // Calculate Indian equivalents once using the first valid serving
+  const indianEquivalents = [];
+  if (baseServingForEquivalents) {
+    const { serving, grams, servingGrams, servingUnit } = baseServingForEquivalents;
+    
+    Object.entries(selectedStandards).forEach(([key, value]) => {
+      const multiplier = value.grams / grams;
+      indianEquivalents.push({
+        measurement: key,
+        description: value.description,
+        equivalent_to: `${(multiplier * servingGrams).toFixed(1)} ${servingUnit}`,
+        nutrition: {
+          calories: (parseFloat(serving.calories || 0) * multiplier).toFixed(1),
+          protein: (parseFloat(serving.protein || 0) * multiplier).toFixed(1),
+          carbs: (parseFloat(serving.carbohydrate || 0) * multiplier).toFixed(1),
+          fat: (parseFloat(serving.fat || 0) * multiplier).toFixed(1),
+          fiber: (parseFloat(serving.fiber || 0) * multiplier).toFixed(1)
+        }
+      });
+    });
+  }
+
+  // Transform original_data to show Indian serving sizes
+  const transformedOriginalData = { ...foodDetails };
+  if (transformedOriginalData.food && transformedOriginalData.food.servings) {
+    const indianServingsList = [];
+    
+    // Use the first non-duplicate serving as base for calculations
+    const baseServing = servingsArray.find(s => {
+      if (!s) return false;
+      const grams = parseFloat(s.metric_serving_amount || 0);
+      const unit = s.metric_serving_unit || "g";
+      return grams > 0;
+    });
+
+    if (baseServing) {
+      const baseGrams = parseFloat(baseServing.metric_serving_amount || 0);
+
+      // Create Indian standard servings
+      Object.entries(selectedStandards).forEach(([key, value]) => {
+        const multiplier = value.grams / baseGrams;
+        
+        // Create a new serving object with all original fields, scaled appropriately
+        const indianServing = {};
+        
+        // Copy all fields from baseServing
+        Object.keys(baseServing).forEach(field => {
+          const fieldValue = baseServing[field];
+          
+          // Fields that should be multiplied (numeric nutritional values)
+          const numericFields = [
+            'calories', 'protein', 'carbohydrate', 'fat', 'fiber',
+            'calcium', 'cholesterol', 'iron', 'potassium', 'sodium',
+            'sugar', 'vitamin_a', 'vitamin_c', 'saturated_fat',
+            'monounsaturated_fat', 'polyunsaturated_fat'
+          ];
+          
+          if (numericFields.includes(field.toLowerCase()) && fieldValue != null) {
+            const numValue = parseFloat(fieldValue);
+            if (!isNaN(numValue)) {
+              indianServing[field] = (numValue * multiplier).toFixed(2);
+            } else {
+              indianServing[field] = fieldValue;
+            }
+          } else if (field === 'metric_serving_amount') {
+            indianServing[field] = value.grams.toFixed(3);
+          } else if (field === 'metric_serving_unit') {
+            indianServing[field] = 'g';
+          } else if (field === 'measurement_description' || field === 'serving_description') {
+            indianServing[field] = value.description;
+          } else if (field === 'number_of_units') {
+            indianServing[field] = '1.000';
+          } else {
+            // Copy other fields as-is (like serving_id, serving_url, etc.)
+            indianServing[field] = fieldValue;
+          }
+        });
+        
+        indianServingsList.push(indianServing);
+      });
+    }
+
+    transformedOriginalData.food.servings = {
+      serving: indianServingsList
+    };
+  }
+
+  return { indianServings: servings, indianEquivalents, transformedOriginalData };
 }
 
 // ========== RECIPE ENDPOINTS ==========

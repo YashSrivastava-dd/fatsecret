@@ -10,7 +10,12 @@ app.use(express.json());
 // Initialize FatSecret client
 const clientId = process.env.FATSECRET_CLIENT_ID;
 const clientSecret = process.env.FATSECRET_CLIENT_SECRET;
-const fatsecret = new FatSecret({ clientId, clientSecret });
+// Region codes: "IN" = India, "US" = United States, "GB" = UK, etc.
+// See: https://platform.fatsecret.com/docs/guides/localization for full list
+// Note: Localization is a premium FatSecret feature
+const region = process.env.FATSECRET_REGION || "IN"; // Default to India
+const language = process.env.FATSECRET_LANGUAGE || null; // Optional language override
+const fatsecret = new FatSecret({ clientId, clientSecret, region, language });
 
 // Health check
 app.get("/health", (req, res) => {
@@ -43,7 +48,9 @@ app.post("/auth/token", async (req, res, next) => {
 app.get("/debug/env", (req, res) => {
   res.json({
     idLen: (process.env.FATSECRET_CLIENT_ID || "").length,
-    secretLen: (process.env.FATSECRET_CLIENT_SECRET || "").length
+    secretLen: (process.env.FATSECRET_CLIENT_SECRET || "").length,
+    region: region,
+    language: language || "(default for region)"
   });
 });
 
@@ -168,10 +175,66 @@ function convertToIndianStandards(foodDetails, foodInfo) {
       piece: { grams: 30, description: "1 Roti/Chapati" },
       two_pieces: { grams: 60, description: "2 Rotis/Chapatis" }
     },
-    // Standard Indian cup (200ml)
+    // Pizza - per slice (average slice ~107g)
+    pizza: {
+      one_slice: { grams: 107, description: "1 Slice" },
+      two_slices: { grams: 214, description: "2 Slices" },
+      half_pizza: { grams: 428, description: "1/2 Pizza (4 slices)" }
+    },
+    // Sandwiches/Burgers - per piece
+    sandwich: {
+      half_piece: { grams: 75, description: "1/2 Sandwich" },
+      one_piece: { grams: 150, description: "1 Sandwich" },
+      two_pieces: { grams: 300, description: "2 Sandwiches" }
+    },
+    // Burger
+    burger: {
+      one_piece: { grams: 150, description: "1 Burger" },
+      large: { grams: 250, description: "1 Large Burger" }
+    },
+    // Wraps/Rolls (Frankie, Kathi Roll, etc.)
+    wrap: {
+      one_piece: { grams: 180, description: "1 Roll/Wrap" },
+      two_pieces: { grams: 360, description: "2 Rolls/Wraps" }
+    },
+    // Cakes/Pastries - per piece/slice
+    cake: {
+      one_slice: { grams: 80, description: "1 Slice" },
+      one_piece: { grams: 60, description: "1 Piece/Pastry" }
+    },
+    // Cookies/Biscuits
+    cookie: {
+      one_piece: { grams: 10, description: "1 Cookie/Biscuit" },
+      two_pieces: { grams: 20, description: "2 Cookies/Biscuits" },
+      packet: { grams: 50, description: "1 Small Packet (5 pcs)" }
+    },
+    // Samosa/Pakora/Snacks
+    snack: {
+      one_piece: { grams: 50, description: "1 Piece" },
+      two_pieces: { grams: 100, description: "2 Pieces" },
+      plate: { grams: 150, description: "1 Plate (3 pcs)" }
+    },
+    // Dosa
+    dosa: {
+      one_piece: { grams: 120, description: "1 Dosa" },
+      two_pieces: { grams: 240, description: "2 Dosas" }
+    },
+    // Idli
+    idli: {
+      one_piece: { grams: 40, description: "1 Idli" },
+      two_pieces: { grams: 80, description: "2 Idlis" },
+      plate: { grams: 160, description: "1 Plate (4 Idlis)" }
+    },
+    // Standard Indian cup (200ml) - default for liquids/beverages/soups
     cup: {
       one_cup: { grams: 200, description: "1 Cup (Indian standard)" },
       half_cup: { grams: 100, description: "1/2 Cup" }
+    },
+    // Default for unrecognized solid foods - use grams/100g
+    default_solid: {
+      hundred_grams: { grams: 100, description: "100g" },
+      fifty_grams: { grams: 50, description: "50g" },
+      two_hundred_grams: { grams: 200, description: "200g" }
     }
   };
 
@@ -187,23 +250,71 @@ function convertToIndianStandards(foodDetails, foodInfo) {
 
   // Determine food type based on name
   const foodName = (food.food_name || foodInfo?.food_name || "").toLowerCase();
+  
+  // Food type detection
   const isRiceDish = foodName.includes("rice") || foodName.includes("biryani") || 
                      foodName.includes("pulao") || foodName.includes("khichdi") ||
-                     foodName.includes("poha");
+                     foodName.includes("poha") || foodName.includes("upma");
   const isDalCurry = foodName.includes("dal") || foodName.includes("curry") || 
                      foodName.includes("sabzi") || foodName.includes("rajma") || 
-                     foodName.includes("chole");
+                     foodName.includes("chole") || foodName.includes("sambar") ||
+                     foodName.includes("rasam") || foodName.includes("kadhi");
   const isRoti = foodName.includes("roti") || foodName.includes("chapati") || 
-                 foodName.includes("naan") || foodName.includes("paratha");
+                 foodName.includes("naan") || foodName.includes("paratha") ||
+                 foodName.includes("kulcha") || foodName.includes("bhatura") ||
+                 foodName.includes("puri") || foodName.includes("thepla");
+  const isPizza = foodName.includes("pizza");
+  const isSandwich = foodName.includes("sandwich") || foodName.includes("sub") ||
+                     foodName.includes("toast") || foodName.includes("grilled cheese");
+  const isBurger = foodName.includes("burger") || foodName.includes("patty");
+  const isWrap = foodName.includes("wrap") || foodName.includes("roll") || 
+                 foodName.includes("frankie") || foodName.includes("kathi") ||
+                 foodName.includes("burrito") || foodName.includes("shawarma");
+  const isCake = foodName.includes("cake") || foodName.includes("pastry") || 
+                 foodName.includes("brownie") || foodName.includes("muffin") ||
+                 foodName.includes("cupcake");
+  const isCookie = foodName.includes("cookie") || foodName.includes("biscuit");
+  const isSnack = foodName.includes("samosa") || foodName.includes("pakora") ||
+                  foodName.includes("pakoda") || foodName.includes("vada") ||
+                  foodName.includes("bhaji") || foodName.includes("cutlet") ||
+                  foodName.includes("tikki") || foodName.includes("spring roll") ||
+                  foodName.includes("momos") || foodName.includes("dumpling");
+  const isDosa = foodName.includes("dosa") || foodName.includes("uttapam") ||
+                 foodName.includes("cheela") || foodName.includes("chilla");
+  const isIdli = foodName.includes("idli");
+  const isBeverage = foodName.includes("tea") || foodName.includes("coffee") ||
+                     foodName.includes("juice") || foodName.includes("lassi") ||
+                     foodName.includes("shake") || foodName.includes("smoothie") ||
+                     foodName.includes("soup") || foodName.includes("milk");
 
   // Determine which Indian standards to use
-  let selectedStandards = INDIAN_STANDARDS.cup;
+  let selectedStandards = INDIAN_STANDARDS.default_solid; // Default for unrecognized foods
   if (isRiceDish) {
     selectedStandards = INDIAN_STANDARDS.rice_dish;
   } else if (isDalCurry) {
     selectedStandards = INDIAN_STANDARDS.dal_curry;
   } else if (isRoti) {
     selectedStandards = INDIAN_STANDARDS.roti;
+  } else if (isPizza) {
+    selectedStandards = INDIAN_STANDARDS.pizza;
+  } else if (isSandwich) {
+    selectedStandards = INDIAN_STANDARDS.sandwich;
+  } else if (isBurger) {
+    selectedStandards = INDIAN_STANDARDS.burger;
+  } else if (isWrap) {
+    selectedStandards = INDIAN_STANDARDS.wrap;
+  } else if (isCake) {
+    selectedStandards = INDIAN_STANDARDS.cake;
+  } else if (isCookie) {
+    selectedStandards = INDIAN_STANDARDS.cookie;
+  } else if (isSnack) {
+    selectedStandards = INDIAN_STANDARDS.snack;
+  } else if (isDosa) {
+    selectedStandards = INDIAN_STANDARDS.dosa;
+  } else if (isIdli) {
+    selectedStandards = INDIAN_STANDARDS.idli;
+  } else if (isBeverage) {
+    selectedStandards = INDIAN_STANDARDS.cup;
   }
 
   // First, collect all original servings

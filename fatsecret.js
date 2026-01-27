@@ -7,12 +7,14 @@ const API_BASE_URL = "https://platform.fatsecret.com/rest/server.api";
 const EXPIRY_BUFFER_SECONDS = 60;
 
 export class FatSecret {
-  constructor({ clientId, clientSecret }) {
+  constructor({ clientId, clientSecret, region = "IN", language = null }) {
     if (!clientId || !clientSecret) {
       throw new Error("FATSECRET_CLIENT_ID and FATSECRET_CLIENT_SECRET are required");
     }
     this.clientId = clientId;
     this.clientSecret = clientSecret;
+    this.region = region; // Default to India (IN). Use "US" for United States, etc.
+    this.language = language; // Optional: override default language for the region
     this.accessToken = null;
     this.expiresAtEpoch = 0; // epoch seconds
 
@@ -61,9 +63,20 @@ export class FatSecret {
   // Generic FatSecret API request helper
   async request(method, params = {}) {
     const token = await this.getAccessToken();
+    
+    // Add region/language parameters for localization (premium feature)
+    const localizationParams = {};
+    if (this.region) {
+      localizationParams.region = this.region;
+    }
+    if (this.language) {
+      localizationParams.language = this.language;
+    }
+    
     const searchParams = new URLSearchParams({
       method,
       format: "json",
+      ...localizationParams,
       ...Object.fromEntries(
         Object.entries(params).map(([k, v]) => [k, v == null ? "" : String(v)])
       )
